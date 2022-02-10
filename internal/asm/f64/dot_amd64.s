@@ -44,37 +44,56 @@ TEXT ·DotUnitary(SB), NOSPLIT, $0
 	MOVQ x+0(FP), R8
 	MOVQ x_len+8(FP), DI // n = len(x)
 	MOVQ y+24(FP), R9
+	MOVQ $0, SI   // i = 0
+    SUBQ $16, DI
 
-    VPXOR X7, X7, X7 // sum = 0
-    VPXOR X8, X8, X8 // sum = 0
-
-    MOVQ $0, SI   // i = 0
-    SUBQ $8, DI
-
-    CMPQ  DI, $-4
-    JL    tail_uni_x
-    CMPQ  DI, $0
+    VPXOR X7, X7, X7
+    VPXOR X8, X8, X8
+    CMPQ DI, $-12
+    JL   tail_uni_x
+    CMPQ DI, $-8
     JL   loop_uni_x
 
     VPXOR Y7, Y7, Y7 // sum = 0
     VPXOR Y8, Y8, Y8 // sum = 0
+    CMPQ DI, $0
+    JL   loop_uni_z_8x
+    VPXORQ Z7, Z7, Z7 // sum = 0
+    VPXORQ Z8, Z8, Z8 // sum = 0
 
-loop_uni_y_8x:
-	// sum += x[i] * y[i] unrolled 8x.
-	VMOVUPD 0(R8)(SI*8), Y0
-	VMOVUPD 0(R9)(SI*8), Y1
-	VMOVUPD 32(R8)(SI*8), Y2
-	VMOVUPD 32(R9)(SI*8), Y3
+loop_uni_z_16x:
+	// sum += x[i] * y[i] unrolled 16x.
+	VMOVUPD 0(R8)(SI*8), Z0
+	VMOVUPD 0(R9)(SI*8), Z1
+	VMOVUPD 64(R8)(SI*8), Z2
+	VMOVUPD 64(R9)(SI*8), Z3
+    VFMADD231PD Z1, Z0, Z7
+    VFMADD231PD Z3, Z2, Z8
+	ADDQ $16, SI   // i += 16
+	SUBQ $16, DI   // n -= 16
+
+    CMPQ DI, $0
+	JGE  loop_uni_z_16x // if n >= 16 goto loop_uni_16x
+    CMPQ DI, $-12
+    JL   tail_uni_z // if n < 4 goto tail_uni_z
+    CMPQ DI, $-8
+    JL   loop_uni_z_4x // if n < 8 goto loop_uni_z_4x
+
+loop_uni_z_8x:
+    // sum += x[i] * y[i] unrolled 8x.
+    VMOVUPD 0(R8)(SI*8), Y0
+    VMOVUPD 0(R9)(SI*8), Y1
+    VMOVUPD 32(R8)(SI*8), Y2
+    VMOVUPD 32(R9)(SI*8), Y3
     VFMADD231PD Y1, Y0, Y7
     VFMADD231PD Y3, Y2, Y8
 
-	ADDQ $8, SI   // i += 8
-	SUBQ $8, DI   // n -= 8
-	JGE  loop_uni_y_8x // if n >= 8 goto loop_uni_8x
-    CMPQ  DI, $-4
-    JL   tail_uni_y  // if n < 4 goto tail_uni
+    ADDQ $8, SI   // i += 8
+    SUBQ $8, DI   // n -= 8
+    CMPQ DI, $-4
+    JL   tail_uni_z // if n < 4 goto tail_uni_z
 
-loop_uni_y_4x:
+loop_uni_z_4x:
     // sum += x[i] * y[i] unrolled 4x
     MOVUPD 0(R8)(SI*8), X0
     MOVUPD 0(R9)(SI*8), X1
@@ -85,12 +104,12 @@ loop_uni_y_4x:
     ADDQ $4, SI   // i += 4
     SUBQ $4, DI   // n -= 4
 
-tail_uni_y:
-	//CMPQ DI, $0
-    ADDQ $8, DI  // n += 8
-	JLE  end_uni_y // if n = 0 goto end_uni_y
+tail_uni_z:
+    // CMPQ DI, $0
+    ADDQ $16, DI  // n += 16
+	JLE  end_uni_z // if n = 0 goto end_uni
 
-onemore_uni_y:
+onemore_uni_z:
 	// sum += x[i] * y[i] for the remaining 1-3 elements.
     MOVSD 0(R8)(SI*8), X0
     MOVSD 0(R9)(SI*8), X1
@@ -99,17 +118,19 @@ onemore_uni_y:
 
 	ADDQ $1, SI      // i++
 	SUBQ $1, DI      // n--
-	JNZ  onemore_uni_y // if n != 0 goto onemore_uni_y
+	JNZ  onemore_uni_z // if n != 0 goto onemore_uni
 
-end_uni_y:
+end_uni_z:
 	// Add the four sums together.
-	VADDPD    Y7, Y8, Y7
+    VADDPD    Z7, Z8, Z7
+    VEXTRACTF64X4   $0x1 ,Z7, Y8
+    VADDPD    Y7, Y8, Y7
     VEXTRACTF128    $0x1 ,Y7, X8
     ADDPD    X8, X7
 	MOVSD    X7, X0
 	UNPCKHPD X7, X7
 	ADDSD    X0, X7
-    MOVSD    X7, sum+48(FP) // Return final sum.
+	MOVSD    X7, sum+48(FP) // Return final sum.
 	RET
 
 loop_uni_x:
@@ -125,8 +146,7 @@ loop_uni_x:
     SUBQ $4, DI   // n -= 4
 
 tail_uni_x:
-    //CMPQ DI, $0  //
-    ADDQ $8, DI  // n += 8
+    ADDQ $16, DI  // n += 16
     JLE  end_uni_x // if n = 0 goto end_uni_x
 
 onemore_uni_x:
@@ -138,7 +158,7 @@ onemore_uni_x:
 
     ADDQ $1, SI      // i++
     SUBQ $1, DI      // n--
-    JNZ  onemore_uni_x // if n != 0 goto onemore_uni_x
+    JNZ  onemore_uni_x // if n != 0 goto onemore_uni
 
 end_uni_x:
     // Add the four sums together.
